@@ -1,0 +1,10 @@
+{
+  "name": "atlas-monad-rfq",
+  "version": "1.0.0",
+  "repository": "https://github.com/FastLane-Labs/atlas-monad-rfq",
+  "author": "FastLane",
+  "scripts": {
+    "deploy-rfq-control-base-sepolia": "source .env && forge script script/DeployRfqControl.s.sol:DeployRfqControlScript --rpc-url ${BASE_TESTNET_RPC_URL} --broadcast --etherscan-api-key ${BASESCAN_API_KEY} --verify --delay 30",
+    "deploy-atlas-executor-base-sepolia": "source .env && forge script script/DeployAtlasExecutor.s.sol:DeployAtlasExecutorScript --rpc-url ${BASE_TESTNET_RPC_URL} --broadcast --etherscan-api-key ${BASESCAN_API_KEY} --verify --delay 30"
+  }
+}
