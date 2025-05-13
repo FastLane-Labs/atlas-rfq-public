@@ -21,8 +21,6 @@ contract RfqControl is DAppControl, RfqErrors {
     address public immutable feeRecipient; // Address to receive the fees
     uint256 public immutable fee; // Fee in basis points (e.g., 50 = 0.5%)
 
-    address private immutable SELF;
-
     constructor(
         address _atlas,
         address _feeRecipient,
@@ -56,7 +54,6 @@ contract RfqControl is DAppControl, RfqErrors {
             })
         )
     {
-        SELF = address(this);
         require(_feeRecipient != address(0), "Invalid fee recipient");
         require(_fee <= 10_000, "Fee too high"); // Maximum is 100% (10000 basis points)
         feeRecipient = _feeRecipient;
