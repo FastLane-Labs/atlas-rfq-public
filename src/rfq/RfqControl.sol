@@ -14,6 +14,8 @@ import "@atlas/types/SolverOperation.sol";
 import { SwapIntent, BaselineCall } from "src/rfq/RfqTypes.sol";
 import { RfqErrors } from "src/rfq/RfqErrors.sol";
 
+import "forge-std/console.sol";
+
 contract RfqControl is DAppControl, RfqErrors {
     uint256 public constant MAX_SOLVER_GAS = 500_000;
 
@@ -99,6 +101,17 @@ contract RfqControl is DAppControl, RfqErrors {
             if (baselineCall.value < swapIntent.amountUserSells) {
                 revert RfqErrors.RfqControl_Swap_BaselineCallValueTooLow();
             }
+        }
+
+        console.log("simulating swap");
+        // Simulate the swap and get the amount out
+        try this.simulateBaselineSwap{ value: msg.value }(swapIntent, baselineCall) {
+            console.log("simulation should not have succeeded");
+            revert RfqErrors.RfqControl_Swap_SimulationFailed();
+        } catch (bytes memory revertData) {
+            uint256 amountOut = abi.decode(revertData, (uint256));
+            console.log("amountOut", amountOut);
+            return (swapIntent, baselineCall);
         }
 
         return (swapIntent, baselineCall);
@@ -288,6 +301,46 @@ contract RfqControl is DAppControl, RfqErrors {
         (bool _success, bytes memory _data) = token.staticcall(abi.encodeCall(IERC20.balanceOf, address(this)));
         if (!_success) revert RfqControl_BalanceCheckFail();
         balance = abi.decode(_data, (uint256));
+    }
+
+    /*
+    * @notice This function simulates the baseline swap without executing it
+    * @param swapIntent The SwapIntent struct
+    * @param baselineCall The BaselineCall struct
+    * @return The simulated amount of tokens that would be received
+    */
+    function simulateBaselineSwap(
+        SwapIntent memory swapIntent,
+        BaselineCall memory baselineCall
+    ) external payable returns (uint256) {
+        console.log("simulating baseline swap");
+        // Track the current balance
+        uint256 _startingBalance = swapIntent.tokenUserBuys == NATIVE_TOKEN
+            ? address(this).balance
+            : _getERC20Balance(swapIntent.tokenUserBuys);
+        console.log("startingBalance", _startingBalance);
+
+        // Approve the router if it's an ERC20 swap
+        // if (swapIntent.tokenUserSells != NATIVE_TOKEN) {
+        //     SafeTransferLib.safeApprove(swapIntent.tokenUserSells, baselineCall.to, swapIntent.amountUserSells);
+        // }
+
+        // Make the call
+        (bool success,) = baselineCall.to.call{value: baselineCall.value}(baselineCall.data);
+        if (!success) revert RfqErrors.RfqControl_BaselineSwap_BaselineCallFail();
+
+        // Get the ending balance
+        uint256 _endingBalance = swapIntent.tokenUserBuys == NATIVE_TOKEN
+            ? address(this).balance
+            : _getERC20Balance(swapIntent.tokenUserBuys);
+
+        if (_endingBalance <= _startingBalance) revert RfqErrors.RfqControl_BaselineSwap_NoBalanceIncrease();
+
+        // Calculate amount out
+        uint256 amountOut = _endingBalance - _startingBalance;
+        
+        // Always revert with the amount out
+        revert RfqControl_SimulationResult(amountOut);
     }
 
     // ---------------------------------------------------- //
