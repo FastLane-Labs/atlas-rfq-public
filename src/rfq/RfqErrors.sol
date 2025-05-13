@@ -15,5 +15,7 @@ contract RfqErrors {
     error RfqControl_Swap_UserOpValueTooLow();
     error RfqControl_Swap_BaselineCallValueTooLow();
     error RfqControl_SimulationResult(uint256 amountOut);
-    error RfqControl_Swap_SimulationFailed();
+    error RfqControl_BaselineSwap_AmountOutBelowMin();
+    error RfqControl_BaselineSwap_SimulationFailed();
+    error RfqControl_BaselineSwap_SimulationDidNotRevert();
 }
