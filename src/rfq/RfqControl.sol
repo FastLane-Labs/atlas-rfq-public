@@ -101,6 +101,44 @@ contract RfqControl is DAppControl, RfqErrors {
             }
         }
 
+        // For Simulation, approve the control contract to spend the sell token
+        if (swapIntent.tokenUserSells != NATIVE_TOKEN) {
+            SafeTransferLib.safeApprove(swapIntent.tokenUserSells, CONTROL, swapIntent.amountUserSells);
+        }
+
+        // Build the payload to invoke simulateBaselineSwap
+        bytes memory payload = abi.encodeWithSelector(
+            this.simulateBaselineSwap.selector,
+            swapIntent,
+            baselineCall
+        );
+
+        // Call it (it always reverts with your result)
+        (bool success, bytes memory revertData) =
+            address(CONTROL).call{ value: msg.value }(payload);
+
+        // Ensure it indeed reverted
+        if (success) revert RfqErrors.RfqControl_BaselineSwap_SimulationDidNotRevert();
+
+        // RevertData = 4-byte selector + abi.encode(uint256)
+        //    so skip the selector to get at the uint256
+        if (revertData.length < 4 + 32) revert RfqErrors.RfqControl_BaselineSwap_SimulationFailed();
+        
+        // Extract the uint256 out of the revertData
+        uint256 amountOut;
+        assembly {
+            // revertData is a `bytes` in memory:
+            // 0x00: length
+            // 0x20: data[0..31] → [ selector (4B) | first 28B of your uint256 ]
+            // so we want the word at revertData + 32 + 4 = revertData + 36
+            amountOut := mload(add(revertData, 36))
+        }
+
+        // Verify that the amount out is greater than or equal to the minAmountUserBuys
+        if (amountOut < swapIntent.minAmountUserBuys) {
+            revert RfqErrors.RfqControl_BaselineSwap_AmountOutBelowMin();
+        }
+
         return (swapIntent, baselineCall);
     }
 
@@ -213,7 +251,7 @@ contract RfqControl is DAppControl, RfqErrors {
             // Transfer the remaining amount to the user
             SafeTransferLib.safeTransferETH(_user(), amountToSend);
         } else {
-            uint256 totalBalance = _getERC20Balance(swapIntent.tokenUserBuys);
+            uint256 totalBalance = _getBalance(swapIntent.tokenUserBuys, address(this));
             feeAmount = (totalBalance * feePerc) / 10_000;
             amountToSend = totalBalance - feeAmount;
 
@@ -231,7 +269,7 @@ contract RfqControl is DAppControl, RfqErrors {
             SafeTransferLib.safeTransferETH(_user(), address(this).balance);
         } else {
             SafeTransferLib.safeTransfer(
-                swapIntent.tokenUserSells, _user(), _getERC20Balance(swapIntent.tokenUserSells)
+                swapIntent.tokenUserSells, _user(), _getBalance(swapIntent.tokenUserSells, address(this))
             );
         }
     }
@@ -250,9 +288,7 @@ contract RfqControl is DAppControl, RfqErrors {
         returns (uint256 received)
     {
         // Track the balance (count any previously-forwarded tokens)
-        uint256 _startingBalance = swapIntent.tokenUserBuys == NATIVE_TOKEN
-            ? address(this).balance - msg.value
-            : _getERC20Balance(swapIntent.tokenUserBuys);
+        uint256 _startingBalance = _getBalance(swapIntent.tokenUserBuys, address(this));
 
         // CASE not native token
         // NOTE: if native token, pass as value
@@ -269,9 +305,7 @@ contract RfqControl is DAppControl, RfqErrors {
         if (!_success) revert RfqErrors.RfqControl_BaselineSwap_BaselineCallFail();
 
         // Track the balance delta
-        uint256 _endingBalance = swapIntent.tokenUserBuys == NATIVE_TOKEN
-            ? address(this).balance - msg.value
-            : _getERC20Balance(swapIntent.tokenUserBuys);
+        uint256 _endingBalance = _getBalance(swapIntent.tokenUserBuys, address(this));
 
         // dont pass custom errors
         if (_endingBalance <= _startingBalance) revert RfqErrors.RfqControl_BaselineSwap_NoBalanceIncrease();
@@ -284,10 +318,53 @@ contract RfqControl is DAppControl, RfqErrors {
     * @param token The address of the token
     * @return The balance of the token
     */
-    function _getERC20Balance(address token) internal view returns (uint256 balance) {
-        (bool _success, bytes memory _data) = token.staticcall(abi.encodeCall(IERC20.balanceOf, address(this)));
-        if (!_success) revert RfqControl_BalanceCheckFail();
-        balance = abi.decode(_data, (uint256));
+    function _getBalance(address token, address user) internal view returns (uint256 balance) {
+        if (token == NATIVE_TOKEN) {
+            balance = user.balance;
+        } else {
+            (bool _success, bytes memory _data) = token.staticcall(abi.encodeCall(IERC20.balanceOf, user));
+            if (!_success) revert RfqControl_BalanceCheckFail();
+            balance = abi.decode(_data, (uint256));
+        }
+    }
+
+    /*
+    * @notice This function simulates the baseline swap without executing it
+    * @param swapIntent The SwapIntent struct
+    * @param baselineCall The BaselineCall struct
+    * @return The simulated amount of tokens that would be received
+    */
+    function simulateBaselineSwap(
+        SwapIntent memory swapIntent,
+        BaselineCall memory baselineCall
+    ) external payable returns (uint256) {
+        if (swapIntent.tokenUserSells != NATIVE_TOKEN) {
+            SafeTransferLib.safeTransferFrom(swapIntent.tokenUserSells, msg.sender, address(this), swapIntent.amountUserSells);
+        }
+        
+        // Track the current balance
+        uint256 _startingBalance = _getBalance(swapIntent.tokenUserSells, msg.sender);
+
+        if (swapIntent.tokenUserSells != NATIVE_TOKEN) {
+            // Approve the router (NOTE that this approval happens either inside the try/catch and is reverted
+            // or in the postOps hook where we cancel it afterwards.
+            SafeTransferLib.safeApprove(swapIntent.tokenUserSells, baselineCall.to, swapIntent.amountUserSells);
+        }
+
+        // Make the call
+        (bool success,) = baselineCall.to.call{value: baselineCall.value}(baselineCall.data);
+        if (!success) revert RfqErrors.RfqControl_BaselineSwap_BaselineCallFail();
+
+        // Get the ending balance
+        uint256 _endingBalance = _getBalance(swapIntent.tokenUserBuys, msg.sender);
+        
+        if (_endingBalance <= _startingBalance) revert RfqErrors.RfqControl_BaselineSwap_NoBalanceIncrease();
+
+        // Calculate amount out
+        uint256 amountOut = _endingBalance - _startingBalance;
+        
+        // Always revert with the amount out
+        revert RfqControl_SimulationResult(amountOut);
     }
 
     // ---------------------------------------------------- //
